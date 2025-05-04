@@ -250,6 +250,13 @@ namespace ctranslate2 {
       return _encoding.dim(1);
     }
 
+    static bool set_low_rank(const models::Model& model, const std::string& scope) {
+      const StorageView* low_rank_weight = model.get_variable_if_exists(scope + "/low_rank_weight_1");
+      if (low_rank_weight) {
+        return true;
+      }
+      return false;
+    }
 
     static const StorageView& get_linear_weight(const models::Model& model,
                                                 const std::string& scope,
@@ -268,7 +275,9 @@ namespace ctranslate2 {
                  const ops::ActivationType* activation_type,
                  const bool is_layer_out)
       : _packed_weight(false)
-      , _weight(get_linear_weight(model, scope, &_packed_weight))
+      , _is_low_rank(set_low_rank(model, scope))
+      , _weight(_is_low_rank ? *model.get_variable_if_exists(scope + "/low_rank_weight_1") : get_linear_weight(model, scope, &_packed_weight))
+      , _weight2(_is_low_rank ? model.get_variable_if_exists(scope + "/low_rank_weight_2") : nullptr)
       , _bias(model.get_variable_if_exists(scope + "/bias"))
       , _qscale(model.get_variable_if_exists(scope + "/weight_scale"))
       , _qzero(model.get_variable_if_exists(scope + "/weight_zero"))
@@ -287,7 +296,7 @@ namespace ctranslate2 {
       , _gemm_op(/*alpha=*/1,
                  /*beta=*/0,
                  /*trans_a=*/false,
-                 /*trans_b=*/true,
+                 /*trans_b=*/ _is_low_rank ? false : true,
                  /*a_is_packed=*/false,
                  _packed_weight,
                  _quantized_gemm ? nullptr : activation_type)
@@ -307,6 +316,12 @@ namespace ctranslate2 {
     }
 
     dim_t Dense::output_size() const {
+      if (_is_low_rank) {
+        if (_partial_weight)
+          throw std::runtime_error("Low rank dense layer does not support partial weights");
+        // weight is transposed when low_rank
+        return _weight2->dim(1);
+      }
       return _partial_weight ? _partial_weight.dim(0) : _weight.dim(0);
     }
 
@@ -338,8 +353,11 @@ namespace ctranslate2 {
 
     void Dense::operator()(const StorageView& input, StorageView& output, const StorageView* residual) const {
       PROFILE("Dense");
+      if (_is_low_rank && !_partial_weight.empty())
+        throw std::runtime_error("Low rank dense layer does not support partial weights");
       const StorageView* qscale = _partial_qscale.empty() ? _qscale : &_partial_qscale;
       const StorageView* weight = _partial_weight.empty() ? &_weight : &_partial_weight;
+      const StorageView* weight2 = _is_low_rank ? _weight2 : nullptr;
       const StorageView* bias = _partial_bias.empty() ? _bias : &_partial_bias;
       const StorageView* compensation = (_partial_u8_shift_compensation.empty()
                                          ? _u8_shift_compensation
@@ -351,6 +369,8 @@ namespace ctranslate2 {
         residual = nullptr;
       }
       if (_quantized_gemm) {
+        if (_is_low_rank)
+          throw std::runtime_error("Low rank dense layer not supported with quantized gemm");
         const auto device = input.device();
         StorageView qinput(_weight.dtype(), device);
         StorageView qinput_scale(_qscale->dtype(), device);
@@ -404,6 +424,8 @@ namespace ctranslate2 {
         (void)_activation_type;
         throw std::invalid_argument("AWQ unsupported with ROCm");
 #else
+        if (_is_low_rank)
+          throw std::runtime_error("Low rank dense layer not supported with quantized gemm");
         switch (_quant_method) {
           case models::QUANTIZATION_TYPE::AWQ_GEMM:
             if (input.dim(0) * input.dim(1) >= 1024) {
@@ -437,7 +459,13 @@ namespace ctranslate2 {
         }
 #endif
       } else {
-        _gemm_op(input, *weight, output, nullptr, bias, residual);
+        if (_is_low_rank) {
+          StorageView intermediate_output(input.dtype(), input.device());
+          _gemm_op(input, *weight, intermediate_output, nullptr);
+          _gemm_op(intermediate_output, *weight2, output, nullptr, bias, residual);
+        } else {
+          _gemm_op(input, *weight, output, nullptr, bias, residual);
+        }
       }
     }
 
