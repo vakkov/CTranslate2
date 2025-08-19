@@ -465,13 +465,12 @@ namespace ctranslate2 {
         q = &queries_proj;
       }
 
-      if (!_is_low_rank) {
-        _linear[0](*q, fused_proj);
-      } else {
-        // Low-rank attention does not fuse qkv.
-        _linear[0](*q, queries_proj);
+      _linear[0](*q, fused_proj);
+
+      if (_is_low_rank) { // support low-rank
         _linear[1](*q, keys_proj);
         _linear[2](*q, values_proj);
+        queries_proj = std::move(fused_proj);
       }
 
       dim_t beam_size = 1;
@@ -489,7 +488,7 @@ namespace ctranslate2 {
 
         if (_num_heads_kv < _num_heads) { // MQA or GQA: queries stay in merged time/head format
           if (_is_low_rank)
-            throw std::invalid_argument("MutliHeadAttention does not support low-rank attention with multi-query or GQA");
+            throw std::invalid_argument("lite whisper doesn't use low-rank for multi-query or GQA");
           if (queries_padder)
             queries_padder->add_padding(fused_proj);
 
@@ -522,10 +521,11 @@ namespace ctranslate2 {
           }
 
         } else {
-          if (!_is_low_rank) {
+          if (!_is_low_rank){
             split_heads(fused_proj, 3 * _num_heads, queries_padder);
             ops::Split(1)(fused_proj, queries_proj, keys_proj, values_proj);
-          } else {
+          }
+          else{
             split_heads(queries_proj, _num_heads, queries_padder);
             split_heads(keys_proj, _num_heads_kv, queries_padder);
             split_heads(values_proj, _num_heads_kv, queries_padder);
