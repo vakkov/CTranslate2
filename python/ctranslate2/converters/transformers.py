@@ -177,7 +177,28 @@ class TransformersConverter(Converter):
 
             if self._copy_files:
                 for filename in self._copy_files:
-                    spec.register_file(self.get_model_file(filename))
+                    if filename == "tokenizer.json" and tokenizer_path != self._model_name_or_path:
+                        try:
+                            tokenizer_file = self.get_model_file(filename)
+                        except ValueError:
+                            tokenizer_file = self.get_model_file(
+                                filename, model_name_or_path=tokenizer_path
+                            )
+                        spec.register_file(tokenizer_file, filename=filename)
+                    else:
+                        spec.register_file(self.get_model_file(filename))
+
+            # Ensure converted Whisper models always include the tokenizer used at
+            # conversion time. This avoids fallback tokenizer mismatches in
+            # downstream runtimes when converting from local folders or custom repos.
+            if (
+                config.model_type in ("whisper", "lite-whisper")
+                and (not self._copy_files or "tokenizer.json" not in self._copy_files)
+            ):
+                spec.register_file(
+                    self.get_model_file("tokenizer.json", model_name_or_path=tokenizer_path),
+                    filename="tokenizer.json",
+                )
 
             return spec
 
@@ -187,13 +208,16 @@ class TransformersConverter(Converter):
     def load_tokenizer(self, tokenizer_class, model_name_or_path, **kwargs):
         return tokenizer_class.from_pretrained(model_name_or_path, **kwargs)
 
-    def get_model_file(self, filename):
-        if os.path.isdir(self._model_name_or_path):
-            path = os.path.join(self._model_name_or_path, filename)
+    def get_model_file(self, filename, model_name_or_path=None):
+        if model_name_or_path is None:
+            model_name_or_path = self._model_name_or_path
+
+        if os.path.isdir(model_name_or_path):
+            path = os.path.join(model_name_or_path, filename)
         else:
             try:
                 path = huggingface_hub.hf_hub_download(
-                    repo_id=self._model_name_or_path, filename=filename
+                    repo_id=model_name_or_path, filename=filename
                 )
             except huggingface_hub.utils.EntryNotFoundError:
                 path = None
@@ -201,7 +225,7 @@ class TransformersConverter(Converter):
         if path is None or not os.path.isfile(path):
             raise ValueError(
                 "File %s does not exist in model %s"
-                % (filename, self._model_name_or_path)
+                % (filename, model_name_or_path)
             )
 
         return path
