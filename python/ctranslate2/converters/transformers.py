@@ -960,7 +960,9 @@ class WhisperLoader(BartLoader):
         else:
             config.suppress_ids = model.config.suppress_tokens
             config.suppress_ids_begin = model.config.begin_suppress_tokens
-            config.alignment_heads = _WHISPER_ALIGNMENT_HEADS.get(model.name_or_path)
+            config.alignment_heads = globals().get("_WHISPER_ALIGNMENT_HEADS", {}).get(
+                model.name_or_path
+            )
 
         if getattr(config, "lang_ids", None) is None:
             config.lang_ids = self._get_lang_ids_from_tokenizer(tokenizer)
@@ -1042,13 +1044,17 @@ class LiteWhisperLoader(WhisperLoader):
         else:
             config.suppress_ids = model.config.suppress_tokens
             config.suppress_ids_begin = model.config.begin_suppress_tokens
-            config.alignment_heads = _WHISPER_ALIGNMENT_HEADS.get(model.name_or_path)
+            config.alignment_heads = globals().get("_WHISPER_ALIGNMENT_HEADS", {}).get(
+                model.name_or_path
+            )
 
         if getattr(config, "lang_ids", None) is None:
             config.lang_ids = self._get_lang_ids_from_tokenizer(tokenizer)
 
         if config.alignment_heads is None:
-            config.alignment_heads = _WHISPER_ALIGNMENT_HEADS.get(model.name_or_path)
+            config.alignment_heads = globals().get("_WHISPER_ALIGNMENT_HEADS", {}).get(
+                model.name_or_path
+            )
             if config.alignment_heads is None:
                     # Use the last half layers for alignment by default.
                 num_layers = model.config.decoder_layers

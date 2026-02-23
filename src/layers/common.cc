@@ -266,14 +266,32 @@ namespace ctranslate2 {
       return model.get_variable(scope + "/weight");
     }
 
+    static const StorageView* get_low_rank_weight(const models::Model& model,
+                                                  const std::string& scope,
+                                                  const std::string& weight_name,
+                                                  bool* is_packed) {
+      const StorageView* weight = model.get_variable_if_exists(scope + "/" + weight_name + "_packed");
+      if (weight) {
+        *is_packed = true;
+        return weight;
+      }
+      *is_packed = false;
+      return &model.get_variable(scope + "/" + weight_name);
+    }
+
     Dense::Dense(const models::Model& model,
                  const std::string& scope,
                  const ops::ActivationType* activation_type,
                  const bool is_layer_out)
       : _packed_weight(false)
+      , _packed_weight2(false)
       , _is_low_rank(has_low_rank(model, scope))
-      , _weight(_is_low_rank ? *model.get_variable_if_exists(scope + "/low_rank_weight_1") : get_linear_weight(model, scope, &_packed_weight))
-      , _weight2(_is_low_rank ? model.get_variable_if_exists(scope + "/low_rank_weight_2") : nullptr)
+      , _weight(_is_low_rank
+                ? *get_low_rank_weight(model, scope, "low_rank_weight_1", &_packed_weight)
+                : get_linear_weight(model, scope, &_packed_weight))
+      , _weight2(_is_low_rank
+                 ? get_low_rank_weight(model, scope, "low_rank_weight_2", &_packed_weight2)
+                 : nullptr)
       , _bias(model.get_variable_if_exists(scope + "/bias"))
       , _qscale(model.get_variable_if_exists(scope + "/weight_scale"))
       , _qzero(model.get_variable_if_exists(scope + "/weight_zero"))
@@ -294,14 +312,14 @@ namespace ctranslate2 {
                  /*trans_a=*/false,
                  /*trans_b=*/true,
                  /*a_is_packed=*/false,
-                 _packed_weight,
+                 _is_low_rank ? _packed_weight2 : _packed_weight,
                  _quantized_gemm ? nullptr : activation_type)
       , _gemm_op_low_rank(/*alpha=*/1,
                  /*beta=*/0,
                  /*trans_a=*/false,
                  /*trans_b=*/true,
                  /*a_is_packed=*/false,
-                 /*packaged_weight=*/false,
+                 /*packaged_weight=*/_packed_weight,
                  /*activation_type=*/ nullptr)
       , _quantize_op(model.use_global_int16_scale()
                      ? ops::Quantize::ScaleType::GLOBAL
@@ -328,6 +346,9 @@ namespace ctranslate2 {
     }
 
     void Dense::select_weights(const StorageView* index, const StorageView* extra_bias) {
+      if (_is_low_rank && index)
+        throw std::runtime_error("Low rank dense layer does not support partial weights");
+
       if (index) {
         if (_packed_weight)
           throw std::runtime_error("Can't select pre-packed weight");
