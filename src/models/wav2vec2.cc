@@ -39,7 +39,10 @@ namespace ctranslate2 {
     }
 
     bool Wav2Vec2Model::is_linear_weight(const std::string& variable_name) const {
-      return is_quantizable(variable_name) && variable_name.find("embeddings") == std::string::npos;
+      return (is_quantizable(variable_name)
+              || variable_name.find("low_rank_weight_1") != std::string::npos
+              || variable_name.find("low_rank_weight_2") != std::string::npos)
+             && variable_name.find("embeddings") == std::string::npos;
     }
 
     std::unique_ptr<Model> Wav2Vec2Model::clone() const {

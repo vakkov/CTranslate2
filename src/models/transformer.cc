@@ -42,8 +42,11 @@ namespace ctranslate2 {
     }
 
     bool TransformerModel::is_linear_weight(const std::string& variable_name) const {
-      // Linear weights are all variables that are quantizable and not under the "embeddings" scope.
-      return is_quantizable(variable_name) && variable_name.find("embeddings") == std::string::npos;
+      // Linear weights include standard quantizable weights and low-rank factors.
+      return (is_quantizable(variable_name)
+              || variable_name.find("low_rank_weight_1") != std::string::npos
+              || variable_name.find("low_rank_weight_2") != std::string::npos)
+             && variable_name.find("embeddings") == std::string::npos;
     }
 
     bool TransformerModel::is_packable(const std::string& variable_name) const {
@@ -119,7 +122,10 @@ namespace ctranslate2 {
     }
 
     bool TransformerDecoderModel::is_linear_weight(const std::string& variable_name) const {
-      return is_quantizable(variable_name) && variable_name.find("embeddings") == std::string::npos;
+      return (is_quantizable(variable_name)
+              || variable_name.find("low_rank_weight_1") != std::string::npos
+              || variable_name.find("low_rank_weight_2") != std::string::npos)
+             && variable_name.find("embeddings") == std::string::npos;
     }
 
     std::unique_ptr<Model> TransformerDecoderModel::clone() const {
@@ -142,7 +148,10 @@ namespace ctranslate2 {
     }
 
     bool TransformerEncoderModel::is_linear_weight(const std::string& variable_name) const {
-      return is_quantizable(variable_name) && variable_name.find("embeddings") == std::string::npos;
+      return (is_quantizable(variable_name)
+              || variable_name.find("low_rank_weight_1") != std::string::npos
+              || variable_name.find("low_rank_weight_2") != std::string::npos)
+             && variable_name.find("embeddings") == std::string::npos;
     }
 
     std::unique_ptr<Model> TransformerEncoderModel::clone() const {

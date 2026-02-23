@@ -44,11 +44,19 @@ namespace ctranslate2 {
 
       _linear[0](*q, fused_proj);
 
+      if (_is_low_rank) {
+        _linear[1](*q, keys_proj);
+        _linear[2](*q, values_proj);
+        queries_proj = std::move(fused_proj);
+      }
+
       dim_t beam_size = 1;
 
       bool prefilling = (_sliding_window > 0 && values_lengths);
 
       if (_num_heads_kv < _num_heads) {
+        if (_is_low_rank)
+          throw std::invalid_argument("lite whisper doesn't use low-rank for multi-query or GQA");
         if (queries_padder)
           queries_padder->add_padding(fused_proj);
 
@@ -58,9 +66,13 @@ namespace ctranslate2 {
         split_heads(queries_proj, _num_heads);
         split_heads(keys_proj, _num_heads_kv);
         split_heads(values_proj, _num_heads_kv);
-      } else {
+      } else if (!_is_low_rank) {
         split_heads(fused_proj, 3 * _num_heads, queries_padder);
         ops::Split(2)(fused_proj, queries_proj, keys_proj, values_proj);
+      } else {
+        split_heads(queries_proj, _num_heads, queries_padder);
+        split_heads(keys_proj, _num_heads_kv, queries_padder);
+        split_heads(values_proj, _num_heads_kv, queries_padder);
       }
 
       if (_rotary_embeddings) {
