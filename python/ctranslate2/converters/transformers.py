@@ -119,13 +119,22 @@ class TransformersConverter(Converter):
                     % (config_name, ", ".join(sorted(_MODEL_LOADERS.keys())))
                 )
 
-            # If lite whisper use corresponding openai tokenizer
+            tokenizer_candidates = [self._model_name_or_path]
             if config.model_type == "lite-whisper":
-                base_name = self._model_name_or_path.split("/")[-1]  # e.g., "lite-whisper-large-v3"
-                base_name = base_name.replace("lite-", "")           # e.g., "whisper-large-v3"
-                tokenizer_path = f"openai/{base_name}"
-            else:
-                tokenizer_path = self._model_name_or_path
+                # Lite-Whisper repositories can omit tokenizer assets or use
+                # suffixes (e.g. "-acc") that do not map to an OpenAI repo.
+                # Try progressively more generic OpenAI tokenizer sources.
+                base_name = self._model_name_or_path.split("/")[-1]
+                if base_name.startswith("lite-"):
+                    base_name = base_name[len("lite-") :]
+
+                tokenizer_candidates.append(f"openai/{base_name}")
+
+                if base_name.endswith("-acc"):
+                    tokenizer_candidates.append(f"openai/{base_name[:-4]}")
+
+                if base_name.startswith("whisper-large-v3"):
+                    tokenizer_candidates.append("openai/whisper-large-v3")
 
             tokenizer_class = transformers.AutoTokenizer
 
@@ -154,9 +163,30 @@ class TransformersConverter(Converter):
             if self._trust_remote_code:
                 tokenizer_kwargs["trust_remote_code"] = self._trust_remote_code
 
-            tokenizer = self.load_tokenizer(
-                tokenizer_class, tokenizer_path, **tokenizer_kwargs
-            )
+            # Keep first occurrence order while removing duplicates.
+            tokenizer_candidates = list(dict.fromkeys(tokenizer_candidates))
+            tokenizer = None
+            tokenizer_path = None
+            tokenizer_errors = {}
+
+            for candidate in tokenizer_candidates:
+                try:
+                    tokenizer = self.load_tokenizer(
+                        tokenizer_class, candidate, **tokenizer_kwargs
+                    )
+                    tokenizer_path = candidate
+                    break
+                except Exception as e:
+                    tokenizer_errors[candidate] = e
+
+            if tokenizer is None:
+                details = ", ".join(
+                    f"{name}: {type(err).__name__}" for name, err in tokenizer_errors.items()
+                )
+                raise RuntimeError(
+                    "Failed to load tokenizer from candidates: %s (%s)"
+                    % (", ".join(tokenizer_candidates), details)
+                )
 
             spec = loader(model, tokenizer)
 
@@ -168,7 +198,10 @@ class TransformersConverter(Converter):
 
             if self._copy_files:
                 for filename in self._copy_files:
-                    if filename == "tokenizer.json" and tokenizer_path != self._model_name_or_path:
+                    if (
+                        filename in ("tokenizer.json", "preprocessor_config.json")
+                        and tokenizer_path != self._model_name_or_path
+                    ):
                         try:
                             tokenizer_file = self.get_model_file(filename)
                         except ValueError:
@@ -190,6 +223,18 @@ class TransformersConverter(Converter):
                     self.get_model_file("tokenizer.json", model_name_or_path=tokenizer_path),
                     filename="tokenizer.json",
                 )
+
+            if (
+                config.model_type in ("whisper", "lite-whisper")
+                and (not self._copy_files or "preprocessor_config.json" not in self._copy_files)
+            ):
+                try:
+                    preprocessor_file = self.get_model_file("preprocessor_config.json")
+                except ValueError:
+                    preprocessor_file = self.get_model_file(
+                        "preprocessor_config.json", model_name_or_path=tokenizer_path
+                    )
+                spec.register_file(preprocessor_file, filename="preprocessor_config.json")
 
             return spec
 
