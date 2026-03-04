@@ -40,6 +40,20 @@ Some of these features are difficult to achieve with standard deep learning fram
 
 ## Installation and usage
 
+* `-DWITH_MKL=ON -DWITH_DNNL=ON`: during runtime, the library will select Intel MKL when running on Intel and oneDNN when running on AMD
+```bash
+rm -rf build/CMakeCache.txt build/CMakeFiles
+cmake -S . -B build \
+  -DBUILD_TESTING=OFF \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DWITH_CUDA=ON \
+  -DWITH_CUDNN=ON \
+  -DWITH_DNNL=ON \
+  -DWITH_ACCELERATE=OFF \
+  -DWITH_MKL=ON \
+  -DWITH_OPENBLAS=OFF
+```
+
 CTranslate2 can be installed with pip:
 
 ```bash
