@@ -37,6 +37,14 @@ endif()
 if(WITH_CUDA)
   target_link_libraries(benchmark_ops PRIVATE ${CUDA_LIBRARIES})
 
+  find_library(CUDA_CUBLASLT_LIBRARY cublasLt
+    HINTS ${CUDA_TOOLKIT_ROOT_DIR}/lib64 ${CUDA_TOOLKIT_ROOT_DIR}/lib/x64)
+  if(CUDA_CUBLASLT_LIBRARY)
+    target_link_libraries(benchmark_ops PRIVATE ${CUDA_CUBLASLT_LIBRARY})
+  else()
+    message(FATAL_ERROR "cuBLASLt library not found")
+  endif()
+
 elseif(WITH_HIP)
   enable_language(HIP)
   list(APPEND CMAKE_PREFIX_PATH ${ROCM_PATH})

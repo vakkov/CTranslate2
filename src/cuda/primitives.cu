@@ -1,5 +1,10 @@
 #include "ctranslate2/primitives.h"
 
+#include <functional>
+#include <limits>
+#include <type_traits>
+#include <unordered_map>
+
 #ifdef CT2_USE_HIP
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
@@ -32,10 +37,290 @@
 #include <thrust/extrema.h>
 #include <thrust/reduce.h>
 
+#include "ctranslate2/storage_view.h"
 #include "cuda/helpers.h"
+#include "env.h"
 #include "type_dispatch.h"
 
 namespace ctranslate2 {
+
+#if !defined(CT2_WITH_CUDA_DYNAMIC_LOADING) && !defined(CT2_USE_HIP)
+  namespace {
+
+    struct CublasLtGemmKey {
+      bool transpose_a;
+      bool transpose_b;
+      dim_t m;
+      dim_t n;
+      dim_t k;
+      dim_t lda;
+      dim_t ldb;
+      dim_t ldc;
+
+      bool operator==(const CublasLtGemmKey& other) const {
+        return transpose_a == other.transpose_a
+          && transpose_b == other.transpose_b
+          && m == other.m
+          && n == other.n
+          && k == other.k
+          && lda == other.lda
+          && ldb == other.ldb
+          && ldc == other.ldc;
+      }
+    };
+
+    struct CublasLtGemmKeyHash {
+      size_t operator()(const CublasLtGemmKey& key) const {
+        size_t hash = 0;
+        auto combine = [&hash](const auto value) {
+          hash ^= std::hash<std::decay_t<decltype(value)>>()(
+            value) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        };
+        combine(key.transpose_a);
+        combine(key.transpose_b);
+        combine(key.m);
+        combine(key.n);
+        combine(key.k);
+        combine(key.lda);
+        combine(key.ldb);
+        combine(key.ldc);
+        return hash;
+      }
+    };
+
+    struct CublasLtGemmAlgo {
+      bool valid = false;
+      cublasLtMatmulAlgo_t algo;
+      size_t workspace_size = 0;
+    };
+
+    bool use_cublaslt_bf16_gemm() {
+      static const bool use = read_bool_from_env("CT2_CUDA_USE_CUBLASLT_BF16_GEMM");
+      return use;
+    }
+
+    static inline bool check_cublaslt(cublasStatus_t status) {
+      return status == CUBLAS_STATUS_SUCCESS;
+    }
+
+    bool try_cublaslt_bf16_gemm(bool transpose_a, bool transpose_b,
+                                dim_t m, dim_t n, dim_t k,
+                                float alpha,
+                                const bfloat16_t* a, dim_t lda,
+                                const bfloat16_t* b, dim_t ldb,
+                                float beta,
+                                bfloat16_t* c, dim_t ldc) {
+      if (!use_cublaslt_bf16_gemm() || beta != 0)
+        return false;
+
+      cublasLtMatmulDesc_t operation_desc = nullptr;
+      cublasLtMatrixLayout_t a_desc = nullptr;
+      cublasLtMatrixLayout_t b_desc = nullptr;
+      cublasLtMatrixLayout_t c_desc = nullptr;
+
+      auto cleanup = [&] {
+        if (c_desc)
+          cublasLtMatrixLayoutDestroy(c_desc);
+        if (b_desc)
+          cublasLtMatrixLayoutDestroy(b_desc);
+        if (a_desc)
+          cublasLtMatrixLayoutDestroy(a_desc);
+        if (operation_desc)
+          cublasLtMatmulDescDestroy(operation_desc);
+      };
+
+      cublasLtHandle_t handle = cuda::get_cublaslt_handle();
+      if (!check_cublaslt(cublasLtMatmulDescCreate(&operation_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F))) {
+        cleanup();
+        return false;
+      }
+
+      const cublasOperation_t transa = transpose_a ? CUBLAS_OP_T : CUBLAS_OP_N;
+      const cublasOperation_t transb = transpose_b ? CUBLAS_OP_T : CUBLAS_OP_N;
+      if (!check_cublaslt(cublasLtMatmulDescSetAttribute(operation_desc,
+                                                         CUBLASLT_MATMUL_DESC_TRANSA,
+                                                         &transa,
+                                                         sizeof(transa)))
+          || !check_cublaslt(cublasLtMatmulDescSetAttribute(operation_desc,
+                                                            CUBLASLT_MATMUL_DESC_TRANSB,
+                                                            &transb,
+                                                            sizeof(transb)))) {
+        cleanup();
+        return false;
+      }
+
+      const dim_t a_rows = transpose_a ? k : m;
+      const dim_t a_cols = transpose_a ? m : k;
+      const dim_t b_rows = transpose_b ? n : k;
+      const dim_t b_cols = transpose_b ? k : n;
+
+      if (!check_cublaslt(cublasLtMatrixLayoutCreate(&a_desc, CUDA_R_16BF, a_rows, a_cols, lda))
+          || !check_cublaslt(cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_16BF, b_rows, b_cols, ldb))
+          || !check_cublaslt(cublasLtMatrixLayoutCreate(&c_desc, CUDA_R_16BF, m, n, ldc))) {
+        cleanup();
+        return false;
+      }
+
+      const cublasLtOrder_t order = CUBLASLT_ORDER_ROW;
+      if (!check_cublaslt(cublasLtMatrixLayoutSetAttribute(a_desc,
+                                                           CUBLASLT_MATRIX_LAYOUT_ORDER,
+                                                           &order,
+                                                           sizeof(order)))
+          || !check_cublaslt(cublasLtMatrixLayoutSetAttribute(b_desc,
+                                                              CUBLASLT_MATRIX_LAYOUT_ORDER,
+                                                              &order,
+                                                              sizeof(order)))
+          || !check_cublaslt(cublasLtMatrixLayoutSetAttribute(c_desc,
+                                                              CUBLASLT_MATRIX_LAYOUT_ORDER,
+                                                              &order,
+                                                              sizeof(order)))) {
+        cleanup();
+        return false;
+      }
+
+      static thread_local std::unordered_map<CublasLtGemmKey,
+                                             CublasLtGemmAlgo,
+                                             CublasLtGemmKeyHash> algo_cache;
+      const CublasLtGemmKey key{transpose_a, transpose_b, m, n, k, lda, ldb, ldc};
+      auto cache_it = algo_cache.find(key);
+
+      static thread_local StorageView workspace(DataType::INT8, Device::CUDA);
+      constexpr size_t max_workspace_size = 32 * 1024 * 1024;
+      if (workspace.size() < static_cast<dim_t>(max_workspace_size))
+        workspace.resize({static_cast<dim_t>(max_workspace_size)});
+
+      if (cache_it == algo_cache.end()) {
+        CublasLtGemmAlgo selected;
+
+        cublasLtMatmulPreference_t preference = nullptr;
+        if (check_cublaslt(cublasLtMatmulPreferenceCreate(&preference))) {
+          const uint64_t workspace_size = max_workspace_size;
+          if (check_cublaslt(cublasLtMatmulPreferenceSetAttribute(preference,
+                                                                  CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                                                  &workspace_size,
+                                                                  sizeof(workspace_size)))) {
+            constexpr int requested_algo_count = 16;
+            cublasLtMatmulHeuristicResult_t results[requested_algo_count];
+            int returned_algo_count = 0;
+            if (check_cublaslt(cublasLtMatmulAlgoGetHeuristic(handle,
+                                                              operation_desc,
+                                                              a_desc,
+                                                              b_desc,
+                                                              c_desc,
+                                                              c_desc,
+                                                              preference,
+                                                              requested_algo_count,
+                                                              results,
+                                                              &returned_algo_count))) {
+              cudaEvent_t start;
+              cudaEvent_t stop;
+              CUDA_CHECK(cudaEventCreate(&start));
+              CUDA_CHECK(cudaEventCreate(&stop));
+
+              float best_ms = std::numeric_limits<float>::infinity();
+              constexpr int tune_iterations = 5;
+              for (int i = 0; i < returned_algo_count; ++i) {
+                if (results[i].state != CUBLAS_STATUS_SUCCESS
+                    || results[i].workspaceSize > max_workspace_size)
+                  continue;
+
+                if (!check_cublaslt(cublasLtMatmul(handle,
+                                                   operation_desc,
+                                                   &alpha,
+                                                   a,
+                                                   a_desc,
+                                                   b,
+                                                   b_desc,
+                                                   &beta,
+                                                   c,
+                                                   c_desc,
+                                                   c,
+                                                   c_desc,
+                                                   &results[i].algo,
+                                                   workspace.buffer(),
+                                                   results[i].workspaceSize,
+                                                   cuda::get_cuda_stream())))
+                  continue;
+
+                CUDA_CHECK(cudaEventRecord(start, cuda::get_cuda_stream()));
+                bool success = true;
+                for (int j = 0; j < tune_iterations; ++j) {
+                  if (!check_cublaslt(cublasLtMatmul(handle,
+                                                     operation_desc,
+                                                     &alpha,
+                                                     a,
+                                                     a_desc,
+                                                     b,
+                                                     b_desc,
+                                                     &beta,
+                                                     c,
+                                                     c_desc,
+                                                     c,
+                                                     c_desc,
+                                                     &results[i].algo,
+                                                     workspace.buffer(),
+                                                     results[i].workspaceSize,
+                                                     cuda::get_cuda_stream()))) {
+                    success = false;
+                    break;
+                  }
+                }
+                CUDA_CHECK(cudaEventRecord(stop, cuda::get_cuda_stream()));
+                CUDA_CHECK(cudaEventSynchronize(stop));
+
+                if (!success)
+                  continue;
+
+                float elapsed_ms = 0;
+                CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
+                const float avg_ms = elapsed_ms / tune_iterations;
+                if (avg_ms < best_ms) {
+                  best_ms = avg_ms;
+                  selected.valid = true;
+                  selected.algo = results[i].algo;
+                  selected.workspace_size = results[i].workspaceSize;
+                }
+              }
+
+              cudaEventDestroy(stop);
+              cudaEventDestroy(start);
+            }
+          }
+
+          cublasLtMatmulPreferenceDestroy(preference);
+        }
+
+        cache_it = algo_cache.emplace(key, selected).first;
+      }
+
+      const CublasLtGemmAlgo& selected = cache_it->second;
+      if (!selected.valid) {
+        cleanup();
+        return false;
+      }
+
+      const bool success = check_cublaslt(cublasLtMatmul(handle,
+                                                         operation_desc,
+                                                         &alpha,
+                                                         a,
+                                                         a_desc,
+                                                         b,
+                                                         b_desc,
+                                                         &beta,
+                                                         c,
+                                                         c_desc,
+                                                         c,
+                                                         c_desc,
+                                                         &selected.algo,
+                                                         workspace.buffer(),
+                                                         selected.workspace_size,
+                                                         cuda::get_cuda_stream()));
+      cleanup();
+      return success;
+    }
+
+  }
+#endif
 
   template<>
   template <typename T>
@@ -554,6 +839,18 @@ namespace ctranslate2 {
                                       float beta,
                                       bfloat16_t* c, dim_t ldc,
                                       const bfloat16_t*) {
+#if !defined(CT2_WITH_CUDA_DYNAMIC_LOADING) && !defined(CT2_USE_HIP)
+    if (try_cublaslt_bf16_gemm(transpose_a, transpose_b,
+                               m, n, k,
+                               alpha,
+                               a, lda,
+                               b, ldb,
+                               beta,
+                               c, ldc)) {
+      return;
+    }
+#endif
+
     // cuBLAS assumes column-major storage, so swap a and b accordingly.
     CUBLAS_CHECK(cublasGemmEx(cuda::get_cublas_handle(),
                               transpose_b ? CUBLAS_OP_T : CUBLAS_OP_N,

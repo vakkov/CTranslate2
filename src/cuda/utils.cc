@@ -116,7 +116,27 @@ namespace ctranslate2 {
       cublasHandle_t _handle;
     };
 
-    // We create one cuBLAS/cuDNN handle per host thread. The handle is destroyed
+#if !defined(CT2_WITH_CUDA_DYNAMIC_LOADING) && !defined(CT2_USE_HIP)
+    class CublasLtHandle {
+    public:
+      CublasLtHandle() {
+        CUDA_CHECK(cudaGetDevice(&_device));
+        CUBLAS_CHECK(cublasLtCreate(&_handle));
+      }
+      ~CublasLtHandle() {
+        ScopedDeviceSetter scoped_device_setter(Device::CUDA, _device);
+        cublasLtDestroy(_handle);
+      }
+      cublasLtHandle_t get() const {
+        return _handle;
+      }
+    private:
+      int _device;
+      cublasLtHandle_t _handle;
+    };
+#endif
+
+    // We create one cuBLAS/cuBLASLt/cuDNN handle per host thread. The handle is destroyed
     // when the thread exits.
 
     cudaStream_t get_cuda_stream() {
@@ -128,6 +148,13 @@ namespace ctranslate2 {
       static thread_local CublasHandle cublas_handle;
       return cublas_handle.get();
     }
+
+#if !defined(CT2_WITH_CUDA_DYNAMIC_LOADING) && !defined(CT2_USE_HIP)
+    cublasLtHandle_t get_cublaslt_handle() {
+      static thread_local CublasLtHandle cublaslt_handle;
+      return cublaslt_handle.get();
+    }
+#endif
 
 #ifdef CT2_WITH_CUDNN
     class CudnnHandle {
