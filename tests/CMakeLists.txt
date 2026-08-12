@@ -32,4 +32,11 @@ target_link_libraries(benchmark_ops
 
 if(WITH_CUDA)
   target_link_libraries(benchmark_ops ${CUDA_LIBRARIES})
+  find_library(CUDA_CUBLASLT_LIBRARY cublasLt
+    HINTS ${CUDA_TOOLKIT_ROOT_DIR}/lib64 ${CUDA_TOOLKIT_ROOT_DIR}/lib/x64)
+  if(CUDA_CUBLASLT_LIBRARY)
+    target_link_libraries(benchmark_ops ${CUDA_CUBLASLT_LIBRARY})
+  else()
+    message(FATAL_ERROR "cuBLASLt library not found")
+  endif()
 endif()

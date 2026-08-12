@@ -4,6 +4,9 @@
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#ifndef CT2_WITH_CUDA_DYNAMIC_LOADING
+#  include <cublasLt.h>
+#endif
 #include <thrust/execution_policy.h>
 
 #ifdef CT2_WITH_TENSOR_PARALLEL
@@ -72,6 +75,9 @@ namespace ctranslate2 {
 
     cudaStream_t get_cuda_stream();
     cublasHandle_t get_cublas_handle();
+#ifndef CT2_WITH_CUDA_DYNAMIC_LOADING
+    cublasLtHandle_t get_cublaslt_handle();
+#endif
 #ifdef CT2_WITH_CUDNN
     cudnnHandle_t get_cudnn_handle();
     cudnnDataType_t get_cudnn_data_type(DataType dtype);
