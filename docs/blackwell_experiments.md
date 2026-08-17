@@ -43,6 +43,28 @@ git switch blackwell-sm120
 git submodule update --init --recursive
 ```
 
+If the experiment branches are not available from the fork, transfer them as
+a self-contained Git bundle. Create and verify the bundle on this machine:
+
+```bash
+git bundle create /tmp/CTranslate2-blackwell-experiments.bundle \
+  blackwell-sm120 blackwell-sm120-cublaslt
+git bundle verify /tmp/CTranslate2-blackwell-experiments.bundle
+scp /tmp/CTranslate2-blackwell-experiments.bundle BLACKWELL_HOST:/tmp/
+```
+
+Then clone it on the Blackwell machine and restore the upstream remote:
+
+```bash
+git clone -b blackwell-sm120 \
+  /tmp/CTranslate2-blackwell-experiments.bundle CTranslate2
+cd CTranslate2
+git remote rename origin experiment-bundle
+git remote add origin https://github.com/OpenNMT/CTranslate2
+git fetch origin
+git submodule update --init --recursive
+```
+
 The local converted model is not tracked by Git. Transfer it separately:
 
 ```bash
