@@ -1,10 +1,27 @@
 #include "benchmark_utils.h"
 
 #include <numeric>
+#include <string>
+#include <utility>
 
 #include "ctranslate2/ops/ops.h"
 
 using namespace ctranslate2;
+
+std::vector<float> small_rand_vector(dim_t size) {
+  std::vector<float> vec(size);
+  for (dim_t i = 0; i < size; ++i)
+    vec[i] = static_cast<float>(static_cast<int>(i % 23) - 11) / 23.f;
+  return vec;
+}
+
+StorageView make_float_storage(Shape shape, DataType dtype, Device device) {
+  const dim_t size = compute_size(shape);
+  StorageView storage(std::move(shape), small_rand_vector(size), device);
+  if (dtype != DataType::FLOAT32)
+    storage = storage.to(dtype);
+  return storage;
+}
 
 void benchmark_gather(Device device) {
   StorageView data({512, 512}, DataType::FLOAT32, device);
@@ -83,13 +100,18 @@ void benchmark_topk(Device device) {
   BENCHMARK(op(input, values, indices), 2000);
 }
 
-void benchmark_gemm(Device device, DataType dtype) {
-  DataType output_dtype = dtype != DataType::FLOAT32 ? DataType::INT32 : dtype;
-  StorageView a({32 * 32, 512}, dtype, device);
-  StorageView b({2048, 512}, dtype, device);
+void benchmark_gemm(Device device, DataType dtype,
+                    dim_t m = 32 * 32, dim_t n = 2048, dim_t k = 512,
+                    size_t samples = 1000) {
+  DataType output_dtype = (dtype == DataType::INT8 || dtype == DataType::INT16
+                           ? DataType::INT32
+                           : dtype);
+  StorageView a = make_float_storage({m, k}, dtype, device);
+  StorageView b = make_float_storage({n, k}, dtype, device);
   StorageView c(output_dtype, device);
   const ops::Gemm gemm_op(1, 0, false, true);
-  BENCHMARK(gemm_op(a, b, c), 1000);
+  std::cerr << "shape " << m << "x" << k << " * " << n << "x" << k << "^T" << std::endl;
+  BENCHMARK(gemm_op(a, b, c), samples);
 }
 
 void benchmark_quantize(Device device, DataType dtype) {
@@ -143,6 +165,14 @@ int main(int argc, char* argv[]) {
     dtype = DataType::INT16;
   else if (dtype_str == "int8")
     dtype = DataType::INT8;
+  else if (dtype_str == "float16")
+    dtype = DataType::FLOAT16;
+  else if (dtype_str == "bfloat16")
+    dtype = DataType::BFLOAT16;
+  else if (dtype_str != "float32") {
+    std::cerr << "unsupported dtype: " << dtype_str << std::endl;
+    return 1;
+  }
 
   if (op == "gather")
     benchmark_gather(device);
@@ -158,8 +188,30 @@ int main(int argc, char* argv[]) {
     benchmark_masked_softmax(device);
   else if (op == "topk")
     benchmark_topk(device);
-  else if (op == "gemm")
-    benchmark_gemm(device, dtype);
+  else if (op == "gemm") {
+    dim_t m = 32 * 32;
+    dim_t n = 2048;
+    dim_t k = 512;
+    size_t samples = 1000;
+
+    if (argc >= 7) {
+      m = static_cast<dim_t>(std::stoll(argv[4]));
+      n = static_cast<dim_t>(std::stoll(argv[5]));
+      k = static_cast<dim_t>(std::stoll(argv[6]));
+      if (argc >= 8)
+        samples = static_cast<size_t>(std::stoull(argv[7]));
+    } else if (argc > 4) {
+      std::cerr << "gemm expects either no shape or: m n k [samples]" << std::endl;
+      return 1;
+    }
+
+    if (m <= 0 || n <= 0 || k <= 0 || samples == 0) {
+      std::cerr << "gemm shape and samples must be positive" << std::endl;
+      return 1;
+    }
+
+    benchmark_gemm(device, dtype, m, n, k, samples);
+  }
   else if (op == "quantize")
     benchmark_quantize(device, dtype);
   else if (op == "dequantize")
