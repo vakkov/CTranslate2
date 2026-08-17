@@ -33,7 +33,9 @@ at a time:
 
 Use CUDA Toolkit 12.8 or newer and a driver that supports the installed
 Blackwell GPU. CUDA 12.5 can run older PTX through driver JIT but cannot build
-native `sm_120` code.
+native `sm_120` code. The benchmark runner defaults to `OPENMP_RUNTIME=COMP`,
+which uses the runtime provided by the host compiler (`libgomp` with GCC) and
+does not require Intel OpenMP on an AMD CPU.
 
 ```bash
 git clone --recursive git@github.com:vakkov/CTranslate2.git

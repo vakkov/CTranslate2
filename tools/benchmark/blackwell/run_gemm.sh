@@ -10,6 +10,7 @@ JOBS="${JOBS:-$(nproc)}"
 RUNS="${RUNS:-3}"
 SAMPLES="${SAMPLES:-300}"
 CUDA_DEVICE="${CUDA_DEVICE:-0}"
+OPENMP_RUNTIME="${OPENMP_RUNTIME:-COMP}"
 
 if [[ -z "${CUDA_TOOLKIT_ROOT_DIR:-}" && -x /usr/local/cuda/bin/nvcc ]]; then
   CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda
@@ -28,6 +29,7 @@ fi
   echo "git_branch=$(git -C "${ROOT_DIR}" branch --show-current)"
   echo "cuda_arch_list=${CUDA_ARCH_LIST}"
   echo "cuda_visible_devices=${CUDA_VISIBLE_DEVICES}"
+  echo "openmp_runtime=${OPENMP_RUNTIME}"
   echo "build_dir=${BUILD_DIR}"
   command -v nvcc >/dev/null && nvcc --version || true
   command -v cmake >/dev/null && cmake --version || true
@@ -48,6 +50,7 @@ cmake_args=(
   -DWITH_CUDNN=OFF
   -DWITH_DNNL=OFF
   -DWITH_MKL=OFF
+  "-DOPENMP_RUNTIME=${OPENMP_RUNTIME}"
   -DCUDA_DYNAMIC_LOADING=OFF
   "-DCUDA_ARCH_LIST=${CUDA_ARCH_LIST}"
 )
