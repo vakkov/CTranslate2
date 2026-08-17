@@ -78,8 +78,10 @@ tools/benchmark/blackwell/run_gemm.sh
 ```
 
 On the optimized branch the runner records both the legacy cuBLAS path and the
-cuBLASLt path. The first call for each unique shape includes algorithm tuning;
-the benchmark macro performs warmup calls before measuring steady state.
+cuBLASLt path for BF16. It also writes `gemm-lt-algos.txt`, which compares and
+validates each heuristic candidate against the legacy result. The first runtime
+call for each unique shape includes algorithm tuning; the benchmark macro
+performs warmup calls before measuring steady state.
 
 The native build must list an `sm_120` image in `cuda-images.txt`. Also verify
 the PTX fallback independently:

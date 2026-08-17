@@ -76,9 +76,9 @@ if command -v cuobjdump >/dev/null; then
   fi
 fi
 
-modes=("cublas:0")
+has_cublaslt=0
 if grep -a -q 'CT2_CUDA_USE_CUBLASLT_BF16_GEMM' "${library}"; then
-  modes+=("cublaslt:1")
+  has_cublaslt=1
 fi
 
 shapes=(
@@ -89,6 +89,11 @@ shapes=(
 
 results_file="${RESULTS_DIR}/gemm.txt"
 for dtype in float16 bfloat16; do
+  modes=("cublas:0")
+  if [[ "${dtype}" == "bfloat16" && "${has_cublaslt}" == 1 ]]; then
+    modes+=("cublaslt:1")
+  fi
+
   for shape in "${shapes[@]}"; do
     read -r m n k <<<"${shape}"
     for mode in "${modes[@]}"; do
@@ -104,5 +109,16 @@ for dtype in float16 bfloat16; do
     done
   done
 done
+
+if [[ "${has_cublaslt}" == 1 ]]; then
+  algo_results_file="${RESULTS_DIR}/gemm-lt-algos.txt"
+  for shape in "${shapes[@]}"; do
+    read -r m n k <<<"${shape}"
+    {
+      echo "case dtype=bfloat16 m=${m} n=${n} k=${k} samples=${SAMPLES} mode=cublaslt-algorithms"
+      "${benchmark}" gemm_lt cuda bfloat16 "${m}" "${n}" "${k}" "${SAMPLES}"
+    } 2>&1 | tee -a "${algo_results_file}"
+  done
+fi
 
 echo "Results written to ${RESULTS_DIR}"
